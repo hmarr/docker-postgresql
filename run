@@ -1,0 +1,71 @@
+#!/bin/bash
+set -e
+
+die() { echo "$@" 1>&2 ; exit 1; }
+
+PG_CONF_PATH=/etc/postgresql/9.3/main/postgresql.conf
+PG_HBA_PATH=/etc/postgresql/9.3/main/pg_hba.conf
+PG_BIN=/usr/lib/postgresql/9.3/bin/postgres
+PG_DATA_DIR=/var/lib/postgresql/9.3/main
+pg_single() {
+  su postgres -c "$PG_BIN --single --config-file=$PG_CONF_PATH"
+}
+
+# set shared buffer size to 25% of total_memory
+SH_BUF_SIZE=$(awk '/MemTotal/ { print int($2/4000) }' /proc/meminfo)
+sed -i "s/shared_buffers = .*/shared_buffers = ${SH_BUF_SIZE}MB/" $PG_CONF_PATH
+
+# listen on all interfaces
+sed -i "s/#listen_addresses = .*/listen_addresses = '*'/" $PG_CONF_PATH
+
+# allow connections from everywhere
+echo "host    all    all    0.0.0.0/0    md5" >> $PG_HBA_PATH
+
+if [ ! -z $ROLE ]; then
+  [ ! -z $REP_USER ]     || die "Missing environment variable REP_USER"
+  [ ! -z $REP_PASSWORD ] || die "Missing environment variable REP_PASSWORD"
+
+  su postgres -c "cat >> $PG_CONF_PATH" << EOF
+wal_level = hot_standby
+max_wal_senders = 3
+checkpoint_segments = 8
+wal_keep_segments = 8
+EOF
+fi
+
+if [ "$ROLE" = "master" ]; then
+  pg_single <<< "CREATE USER $REP_USER REPLICATION LOGIN ENCRYPTED PASSWORD '$REP_PASSWORD';" > /dev/null
+  echo "hostssl replication $REP_USER 0.0.0.0/0 md5" >> $PG_HBA_PATH
+elif [ "$ROLE" = "slave" ]; then
+  [ ! -z $MASTER_HOST ] || die "Missing environment variable MASTER_HOST"
+  MASTER_PORT=${MASTER_PORT:-5432}
+
+  echo "starting base backup"
+  su postgres -c "rm -rf $PG_DATA_DIR"
+  su postgres -c "echo '$REP_PASSWORD' | pg_basebackup -h $MASTER_HOST -p $MASTER_PORT -D $PG_DATA_DIR -U $REP_USER -W -v"
+
+  echo "setting up slave config"
+  su postgres -c "cat >> $PG_CONF_PATH" <<< "hot_standby = on"
+
+  su postgres -c "cat > $PG_DATA_DIR/recovery.conf" << EOF
+standby_mode = 'on'
+primary_conninfo = 'host=$MASTER_HOST port=$MASTER_PORT user=$REP_USER password=$REP_PASSWORD sslmode=require'
+trigger_file = '/tmp/postgresql.trigger'
+EOF
+fi
+
+# if we're a master or not doing replication, we need to set up the user and
+# create the database. slaves get this from the master.
+if [ ! "$ROLE" = "slave" ]; then
+  [ ! -z $DB_USER ]     || die "Missing environment variable DB_USER"
+  [ ! -z $DB_PASSWORD ] || die "Missing environment variable DB_PASSWORD"
+  [ ! -z $DB_NAME ]     || die "Missing environment variable DB_NAME"
+
+  echo "setting up $DB_USER user"
+  pg_single <<< "CREATE USER $DB_USER WITH SUPERUSER;" > /dev/null
+  pg_single <<< "ALTER USER $DB_USER WITH PASSWORD '$DB_PASSWORD';" > /dev/null
+  pg_single <<< "CREATE DATABASE $DB_NAME OWNER $DB_USER;" > /dev/null
+fi
+
+echo "starting postgres"
+su postgres -c "$PG_BIN --config-file=$PG_CONF_PATH"
