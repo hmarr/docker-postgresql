@@ -8,5 +8,6 @@ ADD run /usr/local/bin/run
 RUN chmod +x /usr/local/bin/run
 
 EXPOSE 5432
+VOLUME  ["/var/log/postgresql", "/var/lib/postgresql"]
 CMD ["/usr/local/bin/run"]
 

@@ -33,8 +33,16 @@ wal_keep_segments = 8
 EOF
 fi
 
+if [ ! -d $PG_DATA_DIR ]; then
+  mkdir -p $PG_DATA_DIR
+  chown -R postgres:postgres $PG_DATA_DIR
+  su postgres -c "/usr/lib/postgresql/9.3/bin/initdb -D $PG_DATA_DIR -E 'UTF-8'"
+fi
+
 if [ "$ROLE" = "master" ]; then
-  pg_single <<< "CREATE USER $REP_USER REPLICATION LOGIN ENCRYPTED PASSWORD '$REP_PASSWORD';" > /dev/null
+  if pg_single <<< "SELECT count(*) FROM pg_user WHERE usename = '$REP_USER';" | grep 'count = "0"'; then
+    pg_single <<< "CREATE USER $REP_USER REPLICATION LOGIN ENCRYPTED PASSWORD '$REP_PASSWORD';" > /dev/null
+  fi
   echo "hostssl replication $REP_USER 0.0.0.0/0 md5" >> $PG_HBA_PATH
 elif [ "$ROLE" = "slave" ]; then
   [ ! -z $MASTER_HOST ] || die "Missing environment variable MASTER_HOST"
@@ -61,10 +69,15 @@ if [ ! "$ROLE" = "slave" ]; then
   [ ! -z $DB_PASSWORD ] || die "Missing environment variable DB_PASSWORD"
   [ ! -z $DB_NAME ]     || die "Missing environment variable DB_NAME"
 
-  echo "setting up $DB_USER user"
-  pg_single <<< "CREATE USER $DB_USER WITH SUPERUSER;" > /dev/null
-  pg_single <<< "ALTER USER $DB_USER WITH PASSWORD '$DB_PASSWORD';" > /dev/null
-  pg_single <<< "CREATE DATABASE $DB_NAME OWNER $DB_USER;" > /dev/null
+  if pg_single <<< "SELECT count(*) FROM pg_user WHERE usename = '$DB_USER';" | grep 'count = "0"'; then
+    echo "setting up $DB_USER user"
+    pg_single <<< "CREATE USER $DB_USER WITH SUPERUSER;" > /dev/null
+    pg_single <<< "ALTER USER $DB_USER WITH PASSWORD '$DB_PASSWORD';" > /dev/null
+  fi
+
+  if pg_single <<< "SELECT count(*) FROM pg_database WHERE datname = '$DB_NAME';" | grep 'count = "0"'; then
+    pg_single <<< "CREATE DATABASE $DB_NAME OWNER $DB_USER;" > /dev/null
+  fi
 fi
 
 echo "starting postgres"
